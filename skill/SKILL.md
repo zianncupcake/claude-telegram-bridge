@@ -33,6 +33,12 @@ A session that already sends its own formatted replies must NOT also run the mir
 double every message. Inside the session's topic, type `/history [N]` to replay the last N turns
 (N defaults to 20).
 
+If a message you send sits unread for a minute — laptop asleep, session closed, poll loop not
+armed — the router posts a ⚠️ in that topic to say it is queued, and a ✅ when the session starts
+answering again. Every inbound message is also recorded, one line per message, in a durable
+`asked.log` under that session's mailbox (`~/.claude/mailboxes/<sid>/asked.log`); type `/asked [N]`
+in the topic to see the last N (default 10).
+
 Listen with a Monitor whose command loops `bot_poll.sh` and prints only on a real message:
 
     while true; do out=$("$HOME/.claude/skills/bot/bot_poll.sh" 2>/dev/null || true); case "$out" in TEXT*|PHOTO*|FILE*) echo "$out";; esac; sleep 5; done

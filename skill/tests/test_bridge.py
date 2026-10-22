@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -200,6 +201,88 @@ class MirrorHistory(unittest.TestCase):
         self.assertFalse(os.path.exists(request_path))
         self.assertIn("q8", sent[-1])            # newest turn last, with its user line
         self.assertIn("a8", sent[-1])
+
+
+class StaleInbox(unittest.TestCase):
+    def test_old_file_stale_fresh_not_seen_and_dotfiles_ignored(self):
+        indir = tempfile.mkdtemp()
+        self.assertFalse(router.stale_inbox(indir, 60))          # empty dir
+
+        fresh = os.path.join(indir, "1.txt")
+        open(fresh, "w").close()
+        self.assertFalse(router.stale_inbox(indir, 60))          # just arrived
+        old = time.time() - 120
+        os.utime(fresh, (old, old))
+        self.assertTrue(router.stale_inbox(indir, 60))           # 120s > 60s threshold
+        os.remove(fresh)
+
+        seen = os.path.join(indir, "seen")                       # aged file under seen/ ignored
+        os.makedirs(seen)
+        seenf = os.path.join(seen, "1.txt")
+        open(seenf, "w").close()
+        os.utime(seenf, (old, old))
+        self.assertFalse(router.stale_inbox(indir, 60))
+
+        dot = os.path.join(indir, ".dl.tmp")                     # aged dotfile ignored
+        open(dot, "w").close()
+        os.utime(dot, (old, old))
+        self.assertFalse(router.stale_inbox(indir, 60))
+
+
+class AskedLog(unittest.TestCase):
+    def test_text_and_document_each_append_a_line(self):
+        mailroot = tempfile.mkdtemp()
+        sid = "demo-session"
+        topics = {sid: {"topic_id": 7, "name": "demo"}}
+
+        def no_download(file_id, workdir, convert=True):
+            raise AssertionError("text delivery must not download")
+
+        router.route_updates([{"update_id": 1, "message": {
+            "from": {"id": 1, "is_bot": False},
+            "message_thread_id": 7, "text": "ping the server"}}], topics, mailroot, no_download)
+
+        def fake_download(file_id, workdir, convert=True):
+            tmp = os.path.join(workdir, ".dl.pdf")
+            with open(tmp, "wb") as f:
+                f.write(b"bytes")
+            return tmp
+
+        router.route_updates([{"update_id": 2, "message": {
+            "from": {"id": 1, "is_bot": False}, "message_thread_id": 7,
+            "document": {"file_id": "FID", "file_name": "statement.pdf"}}}],
+            topics, mailroot, fake_download)
+
+        with open(os.path.join(mailroot, sid, "asked.log")) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].endswith("ping the server"))
+        self.assertIn("[file: statement.pdf]", lines[1])
+
+
+class AskedCommand(unittest.TestCase):
+    def test_asked_in_topic_writes_request_and_does_not_deliver_or_log(self):
+        mailroot = tempfile.mkdtemp()
+        sid = "demo-session"
+        topics = {sid: {"topic_id": 7, "name": "demo"}}
+        os.makedirs(os.path.join(mailroot, sid))
+
+        def no_download(file_id, workdir, convert=True):
+            raise AssertionError("a command must not download")
+
+        router.route_updates([{"update_id": 3, "message": {
+            "from": {"id": 1, "is_bot": False},
+            "message_thread_id": 7, "text": "/asked 5"}}], topics, mailroot, no_download)
+
+        with open(os.path.join(mailroot, sid, ".asked_request")) as f:
+            self.assertEqual(f.read(), "5")
+        indir = os.path.join(mailroot, sid, "in")
+        self.assertFalse(os.path.isdir(indir) and os.listdir(indir))     # nothing delivered
+        self.assertFalse(os.path.exists(os.path.join(mailroot, sid, "asked.log")))  # not logged
+
+    def test_asked_arg_parsing(self):
+        self.assertEqual(router._asked_arg("/asked"), "")
+        self.assertIsNone(router._asked_arg("/asked x"))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import tg_fmt
+
 MAILROOT = os.path.expanduser("~/.claude/mailboxes")
 STATE_PATH = os.path.join(MAILROOT, "router.json")
 ENV_PATH = os.path.join(MAILROOT, ".telegram.env")
@@ -23,6 +25,9 @@ LOCK_PATH = os.path.join(MAILROOT, "router.lock")
 JOBS_GLOB = os.path.expanduser("~/.claude/jobs/*/state.json")
 IMAGE_EXT = ("jpg", "jpeg", "png", "gif", "webp")
 TICK_SECONDS = 3
+LISTEN_THRESHOLD = 60   # seconds an inbound may sit unread before we warn the topic
+ASKED_DEFAULT = 10      # /asked with no/invalid count
+ASKED_MAX = 50          # cap one /asked reply so it stays within Telegram's message limit
 
 TOKEN = CHAT_ID = None  # set by main() from .telegram.env; the network layer below reads them
 
@@ -114,6 +119,32 @@ def _history_arg(text):
         return parts[1]
     return None
 
+def _asked_arg(text):
+    """The digit string for "/asked N", "" for a bare /asked, else None."""
+    parts = text.strip().split()
+    if not parts or parts[0] != "/asked":
+        return None
+    if len(parts) == 1:
+        return ""
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[1]
+    return None
+
+def _append_asked(mailroot, sid, m):
+    """Append one line to the session's durable asked.log for each delivered inbound message."""
+    if m.get("photo"):
+        caption = m.get("caption")
+        summary = "[photo] %s" % caption if caption else "[photo]"
+    elif m.get("document"):
+        summary = "[file: %s]" % (m["document"].get("file_name") or "")
+    else:
+        summary = m["text"]
+    sdir = os.path.join(mailroot, sid)
+    os.makedirs(sdir, exist_ok=True)
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with open(os.path.join(sdir, "asked.log"), "a", encoding="utf-8") as f:
+        f.write("%s  %s\n" % (stamp, summary))
+
 def _deliver(m, update_id, mailroot, sid, download):
     indir = os.path.join(mailroot, sid, "in")
     os.makedirs(indir, exist_ok=True)
@@ -167,8 +198,31 @@ def route_updates(updates, topics, mailroot, download):
             if harg is not None:  # /history [N] in a topic: ask its mirror to replay, don't deliver
                 _atomic_write(os.path.join(mailroot, sid, ".history_request"), harg.encode("utf-8"))
                 continue
+            aarg = _asked_arg(m.get("text", ""))
+            if aarg is not None:  # /asked [N]: replay the asked.log tail, don't deliver or log it
+                _atomic_write(os.path.join(mailroot, sid, ".asked_request"), aarg.encode("utf-8"))
+                continue
+            _append_asked(mailroot, sid, m)
             _deliver(m, u["update_id"], mailroot, sid, download)
     return offset, commands
+
+
+def stale_inbox(indir, threshold_s, now=None):
+    """True if any plain inbound file in indir is older than threshold_s — the session's poll
+    loop isn't draining it (asleep, closed, or not armed). Ignores seen/ and dotfiles."""
+    if now is None:
+        now = time.time()
+    try:
+        names = os.listdir(indir)
+    except FileNotFoundError:
+        return False
+    for name in names:
+        if name.startswith("."):
+            continue
+        path = os.path.join(indir, name)
+        if os.path.isfile(path) and now - os.path.getmtime(path) > threshold_s:
+            return True
+    return False
 
 
 # --- session + job state -----------------------------------------------------
@@ -306,11 +360,58 @@ def update_status(router):
         router["status_mid"] = mid
         save_router(router)
 
-def tick(router):
+def check_listening(router, warned):
+    """Warn in a topic when its inbound has sat unread past LISTEN_THRESHOLD (the session is
+    asleep or closed), and say so once when it starts draining again. warned is in-memory."""
+    for sid, topic in router["topics"].items():
+        if stale_inbox(os.path.join(MAILROOT, sid, "in"), LISTEN_THRESHOLD):
+            if not warned.get(sid):
+                send_message(topic["topic_id"], "\u26a0\ufe0f this session isn't picking up right now"
+                             " \u2014 your message is queued and I'll answer when it's back")
+                warned[sid] = True
+        elif warned.get(sid):
+            send_message(topic["topic_id"], "\u2705 back online \u2014 answering your queued messages")
+            warned[sid] = False
+
+def tail_lines(path, n):
+    """The last n non-empty lines of path (newline-stripped, in order); [] if it is missing."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
+    return lines[-n:]
+
+def _asked_n(raw):
+    try:
+        n = int(raw.strip())
+    except (ValueError, AttributeError):
+        return ASKED_DEFAULT
+    return min(n, ASKED_MAX) if n > 0 else ASKED_DEFAULT
+
+def serve_asked_requests(router):
+    """Answer a pending /asked by sending the tail of the session's asked.log into its topic."""
+    for sid, topic in router["topics"].items():
+        req = os.path.join(MAILROOT, sid, ".asked_request")
+        try:
+            raw = open(req).read()
+        except FileNotFoundError:
+            continue
+        lines = tail_lines(os.path.join(MAILROOT, sid, "asked.log"), _asked_n(raw))
+        if lines:
+            body = tg_fmt.b("your recent questions:") + "\n" + tg_fmt.t("\n".join(lines))
+        else:
+            body = tg_fmt.t("nothing logged yet")
+        send_message(topic["topic_id"], body)
+        os.remove(req)
+
+def tick(router, warned):
     reconcile(router)
     for sid, topic in list(router["topics"].items()):
         drain(sid, topic)
     poll(router)
+    check_listening(router, warned)
+    serve_asked_requests(router)
     update_status(router)
 
 def main():
@@ -334,8 +435,9 @@ def main():
     lock.flush()
 
     router = load_router()
+    warned = {}
     while True:
-        tick(router)
+        tick(router, warned)
         time.sleep(TICK_SECONDS)
 
 if __name__ == "__main__":
