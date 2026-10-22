@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copy to ~/Library/LaunchAgents/claude-bot.plist, replace __REPO__ and __PYTHON__
+     (e.g. __PYTHON__ = output of `which python3`), then:
+         launchctl load ~/Library/LaunchAgents/claude-bot.plist
+     Unload with `launchctl unload` of the same path. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>claude-bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__REPO__/skill/router.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__REPO__/router.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/router.log</string>
+</dict>
+</plist>

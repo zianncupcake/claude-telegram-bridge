@@ -1,0 +1,7 @@
+# secrets and runtime state (live under ~/.claude/mailboxes, never in the repo)
+.telegram.env
+router.json
+**/mailboxes/
+# python
+__pycache__/
+*.pyc
