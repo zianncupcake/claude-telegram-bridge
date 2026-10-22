@@ -65,8 +65,9 @@ def close_topic(thread):
 def edit_status(mid, text):
     return _form("editMessageText", chat_id=CHAT_ID, message_id=mid, text=text)
 
-def tg_download(file_id, workdir):
-    """getFile + download into workdir, converting non-jpg/png to png. Returns the temp path
+def tg_download(file_id, workdir, convert=True):
+    """getFile + download into workdir. With convert a non-jpg/png image is turned into png; a
+    document passes convert=False to keep its own bytes and extension. Returns the temp path
     (a dotfile, so a consumer's glob skips it until route_updates renames it into place)."""
     fp = (_form("getFile", file_id=file_id).get("result") or {}).get("file_path")
     if not fp:
@@ -75,7 +76,7 @@ def tg_download(file_id, workdir):
     tmp = os.path.join(workdir, ".dl.%d.%s" % (os.getpid(), ext))
     subprocess.run(["curl", "-s", "https://api.telegram.org/file/bot%s/%s" % (TOKEN, fp),
                     "-o", tmp], check=True)
-    if ext not in ("png", "jpg", "jpeg"):
+    if convert and ext not in ("png", "jpg", "jpeg"):
         png = os.path.join(workdir, ".dl.%d.png" % os.getpid())
         subprocess.run(["sips", "-s", "format", "png", tmp, "--out", png],
                        check=True, capture_output=True)
@@ -102,6 +103,17 @@ def _parse_command(text):
         return ("close", parts[1].strip() if len(parts) > 1 else "")
     return None
 
+def _history_arg(text):
+    """The digit string for "/history N", "" for a bare /history, else None."""
+    parts = text.strip().split()
+    if not parts or parts[0] != "/history":
+        return None
+    if len(parts) == 1:
+        return ""
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[1]
+    return None
+
 def _deliver(m, update_id, mailroot, sid, download):
     indir = os.path.join(mailroot, sid, "in")
     os.makedirs(indir, exist_ok=True)
@@ -113,6 +125,17 @@ def _deliver(m, update_id, mailroot, sid, download):
         final = os.path.join(indir, "%d.%s" % (update_id, ext))
         caption = m.get("caption")
         if caption:  # write the sidecar first; the image rename is the commit
+            _atomic_write(final + ".caption", caption.encode("utf-8"))
+        os.replace(tmp, final)
+    elif m.get("document"):
+        tmp = download(m["document"]["file_id"], indir, convert=False)
+        if not tmp:
+            return
+        name = m["document"].get("file_name") or ""
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        final = os.path.join(indir, "%d.%s" % (update_id, ext or "bin"))
+        caption = m.get("caption")
+        if caption:  # write the sidecar first; the file rename is the commit
             _atomic_write(final + ".caption", caption.encode("utf-8"))
         os.replace(tmp, final)
     else:
@@ -130,7 +153,7 @@ def route_updates(updates, topics, mailroot, download):
         m = u.get("message")
         if not m or (m.get("from") or {}).get("is_bot"):
             continue
-        if not m.get("text") and not m.get("photo"):
+        if not m.get("text") and not m.get("photo") and not m.get("document"):
             continue  # service message (e.g. forum_topic_created)
         thread = m.get("message_thread_id")
         if thread is None or thread == 1:
@@ -140,6 +163,10 @@ def route_updates(updates, topics, mailroot, download):
             continue
         sid = by_thread.get(thread)
         if sid:
+            harg = _history_arg(m.get("text", ""))
+            if harg is not None:  # /history [N] in a topic: ask its mirror to replay, don't deliver
+                _atomic_write(os.path.join(mailroot, sid, ".history_request"), harg.encode("utf-8"))
+                continue
             _deliver(m, u["update_id"], mailroot, sid, download)
     return offset, commands
 

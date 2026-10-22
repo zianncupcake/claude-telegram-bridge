@@ -23,12 +23,23 @@ On start, opt in:
 
     "$HOME/.claude/skills/bot/bot_attach.sh"
 
+Optionally mirror this session's replies into its topic — for a *generic* session that does not
+format and push its own replies. Launch it once, right after attaching (it reads
+`$CLAUDE_CODE_SESSION_ID` and on first run replays the last 5 turns):
+
+    nohup python3 "$HOME/.claude/skills/bot/bot_mirror.py" >/dev/null 2>&1 &
+
+A session that already sends its own formatted replies must NOT also run the mirror — it would
+double every message. Inside the session's topic, type `/history [N]` to replay the last N turns
+(N defaults to 20).
+
 Listen with a Monitor whose command loops `bot_poll.sh` and prints only on a real message:
 
-    while true; do out=$("$HOME/.claude/skills/bot/bot_poll.sh" 2>/dev/null || true); case "$out" in TEXT*|PHOTO*) echo "$out";; esac; sleep 5; done
+    while true; do out=$("$HOME/.claude/skills/bot/bot_poll.sh" 2>/dev/null || true); case "$out" in TEXT*|PHOTO*|FILE*) echo "$out";; esac; sleep 5; done
 
-Each line is `TEXT <path>` or `PHOTO <path>`. Read the file (for a photo, also read
-`<path>.caption` if present), do the work, then reply:
+Each line is `TEXT <path>`, `PHOTO <path>`, or `FILE <path>` (a forwarded document — Read it, Claude
+reads PDFs). Read the file (for a photo or file, also read `<path>.caption` if present), do the
+work, then reply:
 
     python3 -c 'import sys; sys.path.insert(0,"'"$HOME"'/.claude/skills/bot"); import tg_fmt
     open("/tmp/reply.html","w").write(tg_fmt.b("done")+"\n"+tg_fmt.code("print(1)"))'

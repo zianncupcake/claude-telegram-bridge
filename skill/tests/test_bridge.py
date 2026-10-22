@@ -1,4 +1,5 @@
 """Local tests — no live Telegram. Run: python3 -m unittest discover -s skill/tests"""
+import json
 import os
 import subprocess
 import sys
@@ -9,6 +10,7 @@ SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SKILL)
 import router
 import tg_fmt
+import bot_mirror
 
 
 class RouteUpdates(unittest.TestCase):
@@ -92,6 +94,112 @@ class Formatter(unittest.TestCase):
         self.assertTrue(out.startswith("<pre>") and out.endswith("</pre>"))
         self.assertIn(tg_fmt.NBSP * 4, out)            # indented with nbsp
         self.assertNotIn("<pre>    ", out)             # not with plain spaces
+
+
+class DocumentDelivery(unittest.TestCase):
+    def test_document_saved_unconverted_with_caption(self):
+        mailroot = tempfile.mkdtemp()
+        sid = "demo-session"
+        topics = {sid: {"topic_id": 7, "name": "demo"}}
+        payload = b"%PDF-1.4 raw bytes \x00\xff not an image"
+        updates = [{"update_id": 55, "message": {
+            "from": {"id": 1, "is_bot": False},
+            "message_thread_id": 7,
+            "document": {"file_id": "FID", "file_name": "statement.pdf"},
+            "caption": "march"}}]
+        seen = {}
+
+        def fake_download(file_id, workdir, convert=True):
+            seen["convert"] = convert
+            tmp = os.path.join(workdir, ".dl.pdf")
+            with open(tmp, "wb") as f:
+                f.write(payload)
+            return tmp
+
+        router.route_updates(updates, topics, mailroot, fake_download)
+
+        self.assertFalse(seen["convert"])  # a document is never run through sips
+        indir = os.path.join(mailroot, sid, "in")
+        self.assertEqual(sorted(os.listdir(indir)), ["55.pdf", "55.pdf.caption"])
+        with open(os.path.join(indir, "55.pdf"), "rb") as f:
+            self.assertEqual(f.read(), payload)  # bytes untouched
+        with open(os.path.join(indir, "55.pdf.caption")) as f:
+            self.assertEqual(f.read(), "march")
+
+
+class BotPollClassification(unittest.TestCase):
+    def test_text_photo_file_in_update_id_order(self):
+        home = tempfile.mkdtemp()
+        sid = "demo-session"
+        indir = os.path.join(home, ".claude", "mailboxes", sid, "in")
+        os.makedirs(indir)
+        for name in ("1.txt", "2.png", "3.pdf"):
+            with open(os.path.join(indir, name), "w") as f:
+                f.write("x")
+        env = {**os.environ, "HOME": home, "CLAUDE_CODE_SESSION_ID": sid}
+        seen = os.path.join(indir, "seen")
+        out = subprocess.run(["bash", os.path.join(SKILL, "bot_poll.sh")],
+                             env=env, capture_output=True, text=True).stdout
+        self.assertEqual(out.splitlines(),
+                         ["TEXT %s/1.txt" % seen, "PHOTO %s/2.png" % seen, "FILE %s/3.pdf" % seen])
+        self.assertEqual(sorted(os.listdir(seen)), ["1.txt", "2.png", "3.pdf"])
+
+
+class MirrorExtraction(unittest.TestCase):
+    def test_assistant_text_concatenates_and_skips_tool_only(self):
+        with_text = {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Hello "},
+            {"type": "tool_use", "name": "Bash", "input": {}},
+            {"type": "text", "text": "world"}]}}
+        tool_only = {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {}}]}}
+        a_user = {"message": {"role": "user", "content": "hi"}}
+        self.assertEqual(bot_mirror.assistant_text(with_text), "Hello world")
+        self.assertIsNone(bot_mirror.assistant_text(tool_only))
+        self.assertIsNone(bot_mirror.assistant_text(a_user))
+
+    def test_chunk_under_limit_at_line_boundaries_and_rejoins(self):
+        text = ("x" * 100 + "\n") * 60
+        pieces = bot_mirror.chunk(text)
+        self.assertGreater(len(pieces), 1)
+        for p in pieces:
+            self.assertLessEqual(len(p), bot_mirror.CHUNK_LIMIT)
+            self.assertTrue(p.endswith("\n"))  # split on a line boundary
+        self.assertEqual("".join(pieces), text)
+
+    def test_escaped_special_chars_chunk_within_telegram_limit(self):
+        # the bug this guards: html-escaping expands < > & ' so text must be escaped BEFORE chunking
+        raw = ("x < y && z = 'q'\n") * 400
+        pieces = bot_mirror.chunk(tg_fmt.t(raw))
+        self.assertGreater(len(pieces), 1)
+        for p in pieces:
+            self.assertLessEqual(len(p), bot_mirror.CHUNK_LIMIT)
+            self.assertNotRegex(p, r"&[a-zA-Z#0-9]*$")    # never ends mid-entity
+        self.assertEqual("".join(pieces), tg_fmt.t(raw))
+
+
+class MirrorHistory(unittest.TestCase):
+    def test_history_request_replays_capped_then_deletes(self):
+        mbox = tempfile.mkdtemp()
+        transcript = os.path.join(mbox, "t.jsonl")
+        rows = []
+        for i in range(9):
+            rows.append(json.dumps({"message": {"role": "user", "content": "q%d" % i}}))
+            rows.append(json.dumps({"message": {"role": "assistant",
+                                                "content": [{"type": "text", "text": "a%d" % i}]}}))
+        with open(transcript, "w") as f:
+            f.write("\n".join(rows) + "\n")
+        request_path = os.path.join(mbox, ".history_request")
+        with open(request_path, "w") as f:
+            f.write("7")
+        sent = []
+
+        bot_mirror.serve_history_request(transcript, request_path, sent.append)
+
+        self.assertEqual(len(sent), 7)           # last 7 of 9 turns
+        self.assertFalse(os.path.exists(request_path))
+        self.assertIn("q8", sent[-1])            # newest turn last, with its user line
+        self.assertIn("a8", sent[-1])
 
 
 if __name__ == "__main__":
