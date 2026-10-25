@@ -25,6 +25,7 @@ LOCK_PATH = os.path.join(MAILROOT, "router.lock")
 JOBS_GLOB = os.path.expanduser("~/.claude/jobs/*/state.json")
 IMAGE_EXT = ("jpg", "jpeg", "png", "gif", "webp")
 TICK_SECONDS = 3
+CURL_MAX_SECONDS = 60   # bound every curl so one hung request can't stall the single-threaded loop
 LISTEN_THRESHOLD = 60   # seconds an inbound may sit unread before we warn the topic
 ASKED_DEFAULT = 10      # /asked with no/invalid count
 ASKED_MAX = 50          # cap one /asked reply so it stays within Telegram's message limit
@@ -35,7 +36,8 @@ TOKEN = CHAT_ID = None  # set by main() from .telegram.env; the network layer be
 # --- Telegram over curl ------------------------------------------------------
 
 def _curl(*args):
-    out = subprocess.run(["curl", "-s", *args], capture_output=True, text=True).stdout
+    out = subprocess.run(["curl", "-s", "--max-time", str(CURL_MAX_SECONDS), *args],
+                         capture_output=True, text=True).stdout
     try:
         return json.loads(out)
     except ValueError:
@@ -79,8 +81,9 @@ def tg_download(file_id, workdir, convert=True):
         return None
     ext = fp.rsplit(".", 1)[-1].lower()
     tmp = os.path.join(workdir, ".dl.%d.%s" % (os.getpid(), ext))
-    subprocess.run(["curl", "-s", "https://api.telegram.org/file/bot%s/%s" % (TOKEN, fp),
-                    "-o", tmp], check=True)
+    url = "https://api.telegram.org/file/bot%s/%s" % (TOKEN, fp)
+    if subprocess.run(["curl", "-s", "--max-time", str(CURL_MAX_SECONDS), url, "-o", tmp]).returncode:
+        return None
     if convert and ext not in ("png", "jpg", "jpeg"):
         png = os.path.join(workdir, ".dl.%d.png" % os.getpid())
         subprocess.run(["sips", "-s", "format", "png", tmp, "--out", png],
