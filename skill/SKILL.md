@@ -64,3 +64,4 @@ Or install the LaunchAgent: copy `claude-bot.plist` to `~/Library/LaunchAgents/`
 
 Only one router may run — it holds a lockfile. In the group's **General** topic two commands work:
 `/sessions` prints a board of jobs, and `/close <name>` closes a session's topic.
+Anything else typed there gets a not-delivered notice.

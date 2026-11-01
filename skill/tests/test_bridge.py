@@ -36,6 +36,14 @@ class RouteUpdates(unittest.TestCase):
         with open(os.path.join(indir, "42.txt")) as f:
             self.assertEqual(f.read(), "hello there")
 
+    def test_plain_text_in_general_is_marked_not_delivered(self):
+        updates = [{"update_id": 1, "message": {
+            "from": {"id": 1, "is_bot": False}, "text": "hello there"}}]
+
+        _, commands = router.route_updates(updates, {}, tempfile.mkdtemp(), None)
+
+        self.assertEqual(commands, [(router.NOT_DELIVERED, None)])
+
 
 class BotPoll(unittest.TestCase):
     @staticmethod

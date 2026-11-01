@@ -29,6 +29,9 @@ CURL_MAX_SECONDS = 60   # bound every curl so one hung request can't stall the s
 LISTEN_THRESHOLD = 60   # seconds an inbound may sit unread before we warn the topic
 ASKED_DEFAULT = 10      # /asked with no/invalid count
 ASKED_MAX = 50          # cap one /asked reply so it stays within Telegram's message limit
+NOT_DELIVERED = "not_delivered"
+NOT_DELIVERED_NOTICE = ("⚠️ not delivered: General isn't a session."
+                        " Resend this inside the session's topic.")
 
 TOKEN = CHAT_ID = None  # set by main() from .telegram.env; the network layer below reads them
 
@@ -177,8 +180,9 @@ def _deliver(m, update_id, mailroot, sid, download):
 
 def route_updates(updates, topics, mailroot, download):
     """Deliver each message update into the owning session's inbox and collect General-topic
-    commands for the caller to run. Returns (new_offset, commands). Skips bot and service
-    messages. topics maps sessionId -> {topic_id, name, ...}."""
+    commands for the caller to run; anything else in General becomes NOT_DELIVERED. Returns
+    (new_offset, commands). Skips bot and service messages. topics maps sessionId ->
+    {topic_id, name, ...}."""
     by_thread = {t["topic_id"]: sid for sid, t in topics.items()}
     offset = 0
     commands = []
@@ -191,9 +195,7 @@ def route_updates(updates, topics, mailroot, download):
             continue  # service message (e.g. forum_topic_created)
         thread = m.get("message_thread_id")
         if thread is None or thread == 1:
-            cmd = _parse_command(m.get("text", ""))
-            if cmd:
-                commands.append(cmd)
+            commands.append(_parse_command(m.get("text", "")) or (NOT_DELIVERED, None))
             continue
         sid = by_thread.get(thread)
         if sid:
@@ -340,6 +342,8 @@ def poll(router):
             send_message(None, board_text(load_jobs()))
         elif cmd == "close":
             _handle_close(arg, router)
+        elif cmd == NOT_DELIVERED:
+            send_message(None, NOT_DELIVERED_NOTICE)
 
 def _handle_close(name, router):
     for sid, t in router["topics"].items():
